@@ -1,0 +1,3 @@
+flickrapi
+requests
+python-dotenv
