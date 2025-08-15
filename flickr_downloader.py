@@ -1,9 +1,12 @@
 import os
 import re
+import sys
 import time
 import json
+import logging
 import requests
 import flickrapi
+from datetime import datetime
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
@@ -16,20 +19,21 @@ load_dotenv()
 API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
 
-# Video download token (account-specific, get from browser network tab)
-VIDEO_TOKEN = os.getenv("VIDEO_TOKEN")
+# Download settings
+DOWNLOAD_VIDEO = os.getenv("DOWNLOAD_VIDEO", "true").lower() == "true"
 
 # Where to store the downloaded files
 DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "./flickr_downloads")
 CACHE_DIR = "./cache"
 URL_CACHE_FILE = os.path.join(CACHE_DIR, "url_cache.json")
 PROGRESS_FILE = os.path.join(CACHE_DIR, "progress.json")
+LOG_FILE = os.path.join(CACHE_DIR, "flickr_downloader.log")
 
 # Max simultaneous downloads
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", 8))
 
 # Minimum seconds between Flickr API calls to respect rate limits
-API_CALL_DELAY = 1.1
+API_CALL_DELAY = float(os.getenv("API_CALL_DELAY", 1.1))
 
 # Retry/backoff settings
 MAX_RETRIES = 5
@@ -38,6 +42,143 @@ MAX_BACKOFF = 60     # max wait time between retries
 
 # Thread-safe lock for API call timing and cache saving
 api_lock = Lock()
+
+def format_file_size(size_bytes):
+    """Format file size in bytes to human-readable format"""
+    if size_bytes == 0:
+        return ""
+    elif size_bytes < 1024:
+        return f" ({size_bytes} B)"
+    elif size_bytes < 1024 * 1024:
+        return f" ({size_bytes / 1024:.1f} KB)"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f" ({size_bytes / (1024 * 1024):.1f} MB)"
+    else:
+        return f" ({size_bytes / (1024 * 1024 * 1024):.1f} GB)"
+
+def setup_logging():
+    """Setup logging to both console and file"""
+    # Create cache directory if it doesn't exist
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    
+    # Disable flickrapi's verbose logging
+    flickr_logger = logging.getLogger('flickrapi')
+    flickr_logger.setLevel(logging.WARNING)
+    
+    # Set up our custom logger
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.DEBUG)  # Set to DEBUG to capture all levels
+    
+    # Remove existing handlers to avoid duplicates
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+    
+    # Create file handler
+    file_handler = logging.FileHandler(LOG_FILE, mode='a', encoding='utf-8')
+    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+    
+    # Add only file handler to our logger
+    logger.addHandler(file_handler)
+    
+    return logger
+
+# Initialize logger
+logger = None
+
+def print_and_log(message, level="INFO"):
+    """Print message to console and log to file with timestamp"""
+    global logger
+    if logger is None:
+        logger = setup_logging()
+    
+    # For DEBUG messages, only log to file, don't print to console to avoid clutter
+    if level.upper() != "DEBUG":
+        # Print to console with timestamp
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        formatted_message = f"{timestamp} - {message}"
+        print(formatted_message)
+    
+    # Log to file
+    if level.upper() == "ERROR":
+        logger.error(message)
+    elif level.upper() == "WARNING":
+        logger.warning(message)
+    elif level.upper() == "DEBUG":
+        logger.debug(message)
+    else:
+        logger.info(message)
+
+class ProgressSpinner:
+    """A rotating progress indicator"""
+    def __init__(self, message=""):
+        self.message = message
+        self.spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+        self.current = 0
+        self.running = False
+        self.last_logged_message = ""
+        
+    def start(self):
+        """Start showing the spinner"""
+        self.running = True
+        self._show()
+        
+    def update(self, message=None):
+        """Update the spinner and optionally the message"""
+        if message:
+            self.message = message
+            # Log progress updates periodically (every 10th album or when message changes significantly)
+            if message != self.last_logged_message:
+                # Only log when the album changes (not just spinner updates)
+                if "(" in message and ")" in message:
+                    album_part = message.split(")")[-1].strip()
+                    if album_part != self.last_logged_message:
+                        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        log_message = f"{timestamp} - {message}"
+                        # Write to log file directly without console output
+                        global logger
+                        if logger:
+                            logger.info(message)
+                        self.last_logged_message = album_part
+                        
+        if self.running:
+            self._show()
+            
+    def stop(self, final_message=None):
+        """Stop the spinner and show final message"""
+        self.running = False
+        if final_message:
+            # Clear the line and use print_and_log for final message
+            sys.stdout.write(f'\r{" " * 120}\r')
+            sys.stdout.flush()
+            print_and_log(final_message)
+        else:
+            # Just clear the line
+            sys.stdout.write(f'\r{" " * 120}\r')
+            sys.stdout.flush()
+        
+    def _show(self):
+        """Show the current spinner frame"""
+        if self.running:
+            spinner_char = self.spinner[self.current % len(self.spinner)]
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            message = f'{timestamp} - {spinner_char} {self.message}'
+            
+            # Clear the entire line first, then write the new message
+            sys.stdout.write(f'\r{" " * 120}\r{message}')
+            sys.stdout.flush()
+            self.current += 1
+
+def create_spinner_message(album_index, total_albums, album_title):
+    """Create a spinner message that fits within the display buffer"""
+    base_message = f"Scanning albums... ({album_index}/{total_albums}) "
+    available_space = 110 - len(base_message)  # Leave 10 chars buffer
+    
+    if len(album_title) > available_space:
+        truncated_title = album_title[:available_space-3] + "..."
+    else:
+        truncated_title = album_title
+        
+    return f"{base_message}{truncated_title}"
 
 def sanitize_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "_", name)
@@ -72,56 +213,12 @@ def is_video_file(filepath):
     
     return False
 
-def clean_fake_video_files(directory):
-    """Find and remove .mp4/.mov files that are actually images"""
-    cleaned_count = 0
-    if not os.path.exists(directory):
-        return cleaned_count
-        
-    for filename in os.listdir(directory):
-        if filename.lower().endswith(('.mp4', '.mov', '.avi', '.webm')):
-            filepath = os.path.join(directory, filename)
-            if not is_video_file(filepath):
-                print(f"  🗑️ Removing fake video file: {filename}")
-                try:
-                    os.remove(filepath)
-                    cleaned_count += 1
-                except Exception as e:
-                    print(f"  ❌ Could not remove {filename}: {e}")
-    
-    return cleaned_count
-
-def construct_direct_video_url(player_url, video_token=None):
+def get_video_url_from_player(player_url):
     """
-    Construct direct video URL from Flickr player URL using the pattern:
-    https://www.flickr.com/photos/user/PHOTO_ID/play/orig/SECRET/ ->
-    https://live.staticflickr.com/video/PHOTO_ID/SECRET/orig.mp4?s=TOKEN
+    Use the Flickr player URL directly for video downloads.
+    Flickr will serve the highest quality available from this URL.
     """
-    try:
-        # Parse the player URL to extract photo ID and secret
-        url_parts = player_url.rstrip('/').split('/')
-        if len(url_parts) < 7 or 'play' not in url_parts:
-            print(f"  ⚠️ Invalid player URL format: {player_url}")
-            return None
-        
-        photo_id = url_parts[5]  # Photo ID
-        secret = url_parts[-1] if url_parts[-1] != 'orig' else url_parts[-2]  # Secret
-        
-        # Construct the direct URL
-        direct_url = f"https://live.staticflickr.com/video/{photo_id}/{secret}/orig.mp4"
-        
-        # Add the token if provided
-        if video_token:
-            direct_url += f"?s={video_token}"
-        else:
-            print(f"  ⚠️ VIDEO_TOKEN not provided - direct download may fail without authentication token")
-        
-        print(f"  🔗 Constructed direct URL: {direct_url}")
-        return direct_url
-        
-    except Exception as e:
-        print(f"  ❌ Error constructing direct URL: {e}")
-        return None
+    return player_url
 
 def load_json_file(filepath):
     if os.path.exists(filepath):
@@ -179,210 +276,132 @@ def get_original_url_and_info(flickr, photo_id, url_cache):
     photo_info = flickr_api_call_with_retries(flickr.photos.getInfo, photo_id=photo_id)['photo']
     media_type = photo_info.get('media', 'photo')  # 'photo' or 'video'
     
-    original_url = None
+    if media_type == 'video' and not DOWNLOAD_VIDEO:
+        # Skip video downloads if disabled
+        return None
     
-    if media_type == 'video':
-        # For videos, we need to try different approaches to get the actual video file
-        try:
-            # Method 1: Try to get all sizes and look for video-specific URLs
-            sizes = flickr_api_call_with_retries(flickr.photos.getSizes, photo_id=photo_id)['sizes']['size']
-            print(f"  🔍 Available sizes for video {photo_id}:")
-            
-            video_sizes = []
-            image_sizes = []
-            
+    original_url = None
+    selected_info = None
+    
+    try:
+        # Get all available sizes
+        sizes = flickr_api_call_with_retries(flickr.photos.getSizes, photo_id=photo_id)['sizes']['size']
+        
+        if media_type == 'video':
+            # For videos, find the best video URL (prefer Original, then highest resolution, then largest file size)
+            video_candidates = []
             for s in sizes:
-                url = s['source']
-                label = s['label']
-                width = int(s.get('width', 0))
-                height = int(s.get('height', 0))
-                
-                print(f"    {label} ({width}x{height}): {url}")
-                
-                # Check content type to determine if it's actually a video
-                try:
-                    head_response = requests.head(url, timeout=15, allow_redirects=True)
-                    content_type = head_response.headers.get('content-type', '').lower()
-                    content_length = head_response.headers.get('content-length', 0)
-                    try:
-                        content_length = int(content_length)
-                    except:
-                        content_length = 0
-                    
-                    print(f"      Content-Type: {content_type}, Size: {content_length} bytes")
-                    
-                    if 'video' in content_type:
-                        video_sizes.append({
-                            'label': label,
-                            'url': url,
-                            'width': width,
-                            'height': height,
-                            'content_type': content_type,
-                            'size_bytes': content_length,
-                            'resolution': width * height
-                        })
-                    elif 'image' in content_type:
-                        image_sizes.append({
-                            'label': label,
-                            'url': url,
-                            'width': width,
-                            'height': height,
-                            'content_type': content_type,
-                            'size_bytes': content_length,
-                            'resolution': width * height
-                        })
-                    else:
-                        # Unknown content type, categorize by other indicators
-                        label_lower = label.lower()
-                        url_lower = url.lower()
-                        if ('video' in label_lower or 'mp4' in label_lower or 
-                            '.mp4' in url_lower or '.mov' in url_lower or '.avi' in url_lower):
-                            video_sizes.append({
-                                'label': label,
-                                'url': url,
-                                'width': width,
-                                'height': height,
-                                'content_type': content_type or 'unknown',
-                                'size_bytes': content_length,
-                                'resolution': width * height
-                            })
-                        else:
-                            image_sizes.append({
-                                'label': label,
-                                'url': url,
-                                'width': width,
-                                'height': height,
-                                'content_type': content_type or 'unknown',
-                                'size_bytes': content_length,
-                                'resolution': width * height
-                            })
-                except Exception as e:
-                    print(f"      Error checking content type: {e}")
-                    # If we can't check content type, categorize by label/URL
-                    label_lower = label.lower()
-                    url_lower = url.lower()
-                    if ('video' in label_lower or 'mp4' in label_lower or 
-                        '.mp4' in url_lower or '.mov' in url_lower or '.avi' in url_lower):
-                        video_sizes.append({
-                            'label': label,
-                            'url': url,
-                            'width': width,
-                            'height': height,
-                            'content_type': 'unknown',
-                            'size_bytes': 0,
-                            'resolution': width * height
-                        })
-                    else:
-                        image_sizes.append({
-                            'label': label,
-                            'url': url,
-                            'width': width,
-                            'height': height,
-                            'content_type': 'unknown',
-                            'size_bytes': 0,
-                            'resolution': width * height
-                        })
+                if '/play/' in s['source'] or 'video' in s['label'].lower():
+                    resolution = int(s.get('width', 0)) * int(s.get('height', 0))
+                    file_size = int(s.get('size', 0))  # File size in bytes
+                    video_candidates.append({
+                        'url': s['source'],
+                        'label': s['label'],
+                        'width': int(s.get('width', 0)),
+                        'height': int(s.get('height', 0)),
+                        'resolution': resolution,
+                        'file_size': file_size,
+                        'is_original': s['label'].lower() == 'original'
+                    })
             
-            # Select the best video URL
-            if video_sizes:
-                # Sort by: 1. file size (bytes), 2. resolution, 3. prefer "original" in label
-                def video_sort_key(v):
-                    size_score = v['size_bytes'] if v['size_bytes'] > 0 else v['resolution']
-                    original_bonus = 1000000 if 'original' in v['label'].lower() else 0
-                    return size_score + original_bonus
+            if video_candidates:
+                # Sort by: 1) original flag, 2) resolution, 3) file size (all descending)
+                video_candidates.sort(key=lambda x: (x['is_original'], x['resolution'], x['file_size']), reverse=True)
                 
-                video_sizes.sort(key=video_sort_key, reverse=True)
-                best_video = video_sizes[0]
+                # Log all candidates for transparency (debug level)
+                if len(video_candidates) > 1:
+                    print_and_log(f"    📊 Video quality candidates for {photo_id}:", "DEBUG")
+                    for i, candidate in enumerate(video_candidates):
+                        marker = "👑" if i == 0 else "  "
+                        size_info = format_file_size(candidate['file_size'])
+                        print_and_log(f"      {marker} {candidate['label']} ({candidate['width']}x{candidate['height']}){size_info}", "DEBUG")
+                
+                best_video = video_candidates[0]
                 original_url = best_video['url']
                 
-                # Check if this is a Flickr video player URL that needs to be resolved to direct URL
+                # Include file size in selection info if available
+                size_info = format_file_size(best_video['file_size'])
+                selected_info = f"{best_video['label']} ({best_video['width']}x{best_video['height']}){size_info}"
+                
+                # Use player URL directly if it's a player URL
                 if '/play/' in original_url:
-                    print(f"  🔄 Converting Flickr video player URL to direct download URL...")
-                    direct_url = construct_direct_video_url(original_url, VIDEO_TOKEN)
-                    if direct_url and direct_url != original_url:
-                        original_url = direct_url
-                        print(f"  ✅ Converted to direct URL: {original_url}")
-                    else:
-                        print(f"  ⚠️ Could not convert to direct URL, using original")
-                
-                print(f"  ✅ Selected highest quality video:")
-                print(f"    {best_video['label']} ({best_video['width']}x{best_video['height']})")
-                print(f"    {best_video['size_bytes']} bytes, Content-Type: {best_video['content_type']}")
-                print(f"    URL: {original_url}")
-                
-            elif image_sizes:
-                # No actual video URLs found, use highest resolution image as fallback
-                image_sizes.sort(key=lambda x: x['resolution'], reverse=True)
-                best_image = image_sizes[0]
-                original_url = best_image['url']
-                print(f"  ⚠️ No video URLs found! Using highest resolution image as fallback:")
-                print(f"    {best_image['label']} ({best_image['width']}x{best_image['height']})")
-                print(f"    This will likely be a preview image, not the actual video!")
-                
+                    original_url = get_video_url_from_player(original_url)
+                    
+                print_and_log(f"    🎬 Selected video quality: {selected_info}")
             else:
-                # Fallback to original logic if we can't categorize anything
-                for s in sizes:
-                    if s['label'].lower() == "original":
-                        original_url = s['source']
-                        print(f"  ⚠️ Using 'Original' size (may be preview): {original_url}")
-                        break
-                        
-            if not original_url:
-                original_url = sizes[-1]['source']
-                print(f"  ⚠️ Using largest available size: {original_url}")
-                
-        except Exception as e:
-            print(f"  ❌ Error processing video {photo_id}: {e}")
-            # Fallback to normal sizes API
-            sizes = flickr_api_call_with_retries(flickr.photos.getSizes, photo_id=photo_id)['sizes']['size']
+                print_and_log(f"    ❌ No video URLs found for {photo_id}", "ERROR")
+                return None
+        else:
+            # For photos, find the highest quality image (prefer Original, then highest resolution, then largest file size)
+            photo_candidates = []
             for s in sizes:
-                if s['label'].lower() == "original":
-                    original_url = s['source']
-                    break
-            if not original_url:
-                original_url = sizes[-1]['source']
-    else:
-        # For photos, use the normal sizes API
-        sizes = flickr_api_call_with_retries(flickr.photos.getSizes, photo_id=photo_id)['sizes']['size']
-        for s in sizes:
-            if s['label'].lower() == "original":
-                original_url = s['source']
-                break
-        if not original_url:
-            original_url = sizes[-1]['source']
+                # Skip video-specific URLs for photos
+                if '/play/' not in s['source'] and 'video' not in s['label'].lower():
+                    resolution = int(s.get('width', 0)) * int(s.get('height', 0))
+                    file_size = int(s.get('size', 0))  # File size in bytes
+                    photo_candidates.append({
+                        'url': s['source'],
+                        'label': s['label'],
+                        'width': int(s.get('width', 0)),
+                        'height': int(s.get('height', 0)),
+                        'resolution': resolution,
+                        'file_size': file_size,
+                        'is_original': s['label'].lower() == 'original'
+                    })
+            
+            if photo_candidates:
+                # Sort by: 1) original flag, 2) resolution, 3) file size (all descending)
+                photo_candidates.sort(key=lambda x: (x['is_original'], x['resolution'], x['file_size']), reverse=True)
+                
+                # Log all candidates for transparency (debug level)
+                if len(photo_candidates) > 1:
+                    print_and_log(f"    📊 Image quality candidates for {photo_id}:", "DEBUG")
+                    for i, candidate in enumerate(photo_candidates):
+                        marker = "👑" if i == 0 else "  "
+                        size_info = format_file_size(candidate['file_size'])
+                        print_and_log(f"      {marker} {candidate['label']} ({candidate['width']}x{candidate['height']}){size_info}", "DEBUG")
+                
+                best_photo = photo_candidates[0]
+                original_url = best_photo['url']
+                
+                # Include file size in selection info if available
+                size_info = format_file_size(best_photo['file_size'])
+                selected_info = f"{best_photo['label']} ({best_photo['width']}x{best_photo['height']}){size_info}"
+                
+                print_and_log(f"    📷 Selected image quality: {selected_info}")
+            else:
+                print_and_log(f"    ❌ No image URLs found for {photo_id}", "ERROR")
+                return None
+
+    except Exception as e:
+        print_and_log(f"  ❌ Error getting sizes for {photo_id}: {e}", "ERROR")
+        return None
+
+    if not original_url:
+        return None
 
     # Cache and save immediately
-    result = {'url': original_url, 'media_type': media_type}
+    result = {'url': original_url, 'media_type': media_type, 'selected_info': selected_info}
     url_cache[cache_key] = result
     save_json_file(URL_CACHE_FILE, url_cache)
     return result
 
 def download_file(url, filepath, media_type=None):
     try:
-        # Increase timeout for downloads
         response = requests.get(url, stream=True, timeout=180)
         response.raise_for_status()
         
-        # Get actual content type from response headers
+        # Get actual content type and determine correct extension
         content_type = response.headers.get('content-type', '').lower()
-        print(f"  📄 Content-Type: {content_type}")
-        
-        # Determine correct extension based on content type
         correct_ext = None
+        
         if 'video' in content_type or media_type == 'video':
             if 'mp4' in content_type:
                 correct_ext = '.mp4'
             elif 'mov' in content_type or 'quicktime' in content_type:
                 correct_ext = '.mov'
-            elif 'avi' in content_type:
-                correct_ext = '.avi'
-            elif 'webm' in content_type:
-                correct_ext = '.webm'
-            elif 'flv' in content_type:
-                correct_ext = '.flv'
             else:
                 correct_ext = '.mp4'  # Default for videos
-                print(f"  ⚠️ Unknown video content-type '{content_type}', using .mp4")
         elif 'image' in content_type:
             if 'jpeg' in content_type or 'jpg' in content_type:
                 correct_ext = '.jpg'
@@ -390,32 +409,20 @@ def download_file(url, filepath, media_type=None):
                 correct_ext = '.png'
             elif 'gif' in content_type:
                 correct_ext = '.gif'
-            elif 'webp' in content_type:
-                correct_ext = '.webp'
-            elif 'tiff' in content_type:
-                correct_ext = '.tiff'
             else:
                 correct_ext = '.jpg'  # Default for images
-                print(f"  ⚠️ Unknown image content-type '{content_type}', using .jpg")
         else:
-            # Fallback: try to determine from media_type if content-type is unclear
-            if media_type == 'video':
-                correct_ext = '.mp4'
-                print(f"  ⚠️ Unclear content-type '{content_type}' for video, using .mp4")
-            else:
-                correct_ext = '.jpg'
-                print(f"  ⚠️ Unclear content-type '{content_type}' for photo, using .jpg")
+            # Fallback based on media_type
+            correct_ext = '.mp4' if media_type == 'video' else '.jpg'
         
-        # Update filepath if extension is incorrect
+        # Update filepath if extension needs correction
         if correct_ext:
             base_path, current_ext = os.path.splitext(filepath)
             if current_ext.lower() != correct_ext.lower():
-                new_filepath = base_path + correct_ext
-                print(f"  🔄 Correcting extension: {os.path.basename(filepath)} -> {os.path.basename(new_filepath)}")
-                filepath = new_filepath
+                filepath = base_path + correct_ext
         
         with open(filepath, 'wb') as f:
-            for chunk in response.iter_content(8192):  # Larger chunks for better performance
+            for chunk in response.iter_content(8192):
                 f.write(chunk)
         return filepath
     except Exception as e:
@@ -424,12 +431,7 @@ def download_file(url, filepath, media_type=None):
 def process_downloads(album_title, photo_ids, flickr, url_cache, downloaded_ids):
     album_folder = os.path.join(DOWNLOAD_DIR, album_title)
     os.makedirs(album_folder, exist_ok=True)
-    print(f"\n📂 Processing album: {album_title} ({len(photo_ids)} photos)")
-    
-    # Clean up any fake video files from previous runs
-    cleaned_count = clean_fake_video_files(album_folder)
-    if cleaned_count > 0:
-        print(f"  🧹 Cleaned up {cleaned_count} fake video files")
+    print_and_log(f"📂 Processing album: {album_title} ({len(photo_ids)} photos)")
     
     # Debug directory permissions
     try:
@@ -453,30 +455,25 @@ def process_downloads(album_title, photo_ids, flickr, url_cache, downloaded_ids)
     downloaded_count = 0
     skipped_count = 0
     failed_count = 0
-
-    # Check if we should limit initial downloads for large albums
-    photo_limit = None
-    if len(photo_ids) > 1000:
-        # Comment out or remove these lines to download all photos
-        # photo_limit = 50
-        # print(f"  ⚠️ Large album detected ({len(photo_ids)} photos). First downloading {photo_limit} photos as a test.")
-        print(f"  ℹ️ Large album detected ({len(photo_ids)} photos). Downloading all photos.")
     
     for i, (photo_id, title) in enumerate(photo_ids):
-        if photo_limit and i >= photo_limit:
-            break
-            
         if photo_id in downloaded_ids:
             print(f"  ⏩ Skipping {title} (ID: {photo_id}) (marked as downloaded)")
             skipped_count += 1
             continue
 
         try:
-            print(f"  🔍 Getting URL for photo {photo_id} ({title})")
             url_info = get_original_url_and_info(flickr, photo_id, url_cache)
+            if not url_info:  # Skip if video downloads are disabled
+                skipped_count += 1
+                continue
+                
             url = url_info['url']
             media_type = url_info['media_type']
-            print(f"  📋 URL: {url} (media type: {media_type})")
+            
+            # Log currently processed media file
+            media_icon = "🎥" if media_type == 'video' else "📸"
+            print_and_log(f"  {media_icon} Processing: {title} ({media_type})")
             
             # Determine file extension based on media type and URL
             ext = os.path.splitext(url)[1]
@@ -548,22 +545,19 @@ def process_downloads(album_title, photo_ids, flickr, url_cache, downloaded_ids)
             failed_count += 1
 
     if not download_tasks:
-        print(f"  ⚠️ No files to download in this album. All {skipped_count} photos were skipped.")
+        print(f"  ⚠️ No files to download in this album. All {skipped_count} files were skipped.")
         if photo_ids and skipped_count == 0 and failed_count == 0:
-            print(f"  ⚠️ CRITICAL: No downloads were queued despite having {len(photo_ids)} photos.")
+            print(f"  ⚠️ CRITICAL: No downloads were queued despite having {len(photo_ids)} files.")
         return {"album": album_title, "downloaded": 0, "skipped": skipped_count, "failed": failed_count}
     
-    print(f"  🔽 Downloading {len(download_tasks)} photos...")
+    print_and_log(f"  🔽 Downloading {len(download_tasks)} files...")
 
     def download_task(task):
         photo_id, url, path, media_type = task
         try:
-            print(f"  ⬇️ Starting download: {os.path.basename(path)} ({media_type})")
             result = download_file(url, path, media_type)
-            print(f"  ✓ Finished download: {os.path.basename(result) if not result.startswith('ERROR') else 'FAILED'}")
             return photo_id, result
         except Exception as e:
-            print(f"  ❌ Download exception: {e}")
             return photo_id, f"ERROR: {path} - {e}"
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -573,26 +567,21 @@ def process_downloads(album_title, photo_ids, flickr, url_cache, downloaded_ids)
             try:
                 photo_id, result = future.result()
                 if isinstance(result, str) and result.startswith("ERROR"):
-                    print(f"  ❌ {result}")
+                    print_and_log(f"  ❌ Failed: {os.path.basename(result.split(' - ')[0].replace('ERROR: ', ''))}", "ERROR")
                     failed_count += 1
                 else:
-                    print(f"  ✅ Downloaded: {os.path.basename(result)}")
+                    # Determine media type from file extension for logging
+                    filename = os.path.basename(result)
+                    is_video_download = result.lower().endswith(('.mp4', '.mov', '.avi', '.webm'))
+                    media_icon = "🎥" if is_video_download else "📸"
+                    print_and_log(f"  ✅ Downloaded: {media_icon} {filename}")
+                    
                     # Verify file exists and has content
                     if os.path.exists(result) and os.path.getsize(result) > 0:
-                        # Additional check for video files - make sure they're actually videos
-                        if result.lower().endswith(('.mp4', '.mov', '.avi', '.webm')) and not is_video_file(result):
-                            print(f"  ❌ File {os.path.basename(result)} is not a valid video file (likely a preview image)")
-                            try:
-                                os.remove(result)
-                                print(f"  🗑️ Removed invalid video file")
-                            except Exception as e:
-                                print(f"  ⚠️ Could not remove invalid file: {e}")
-                            failed_count += 1
-                        else:
-                            downloaded_count += 1
-                            downloaded_ids.add(photo_id)
+                        downloaded_count += 1
+                        downloaded_ids.add(photo_id)
                     else:
-                        print(f"  ⚠️ File verification failed for {result}")
+                        print_and_log(f"  ⚠️ File verification failed for {filename}", "WARNING")
                         failed_count += 1
             except Exception as e:
                 print(f"  ❌ Unexpected error processing download result: {e}")
@@ -615,22 +604,26 @@ def process_downloads(album_title, photo_ids, flickr, url_cache, downloaded_ids)
     }
 
 def main():
+    # Setup logging
+    global logger
+    logger = setup_logging()
+    
+    print_and_log("🚀 Starting Flickr Downloader")
+    print_and_log("=" * 50)
+    
     # Check for required configurations
     if not API_KEY or not API_SECRET:
-        print("❌ ERROR: API_KEY and API_SECRET must be set in .env file")
-        return
+        print_and_log("❌ ERROR: API_KEY and API_SECRET must be set in .env file", "ERROR")
+        return    
     
-    if not VIDEO_TOKEN:
-        print("⚠️ WARNING: VIDEO_TOKEN not set in .env file")
-        print("   Video downloads may fail without the authentication token")
-        print("   See Readme for instructions on how to get the token")
-        print()
+    print_and_log(f"ℹ️ Video downloads: {'✅ Enabled' if DOWNLOAD_VIDEO else '❌ Disabled'}")
+    print_and_log("")
     
     flickr = flickrapi.FlickrAPI(API_KEY, API_SECRET, format='parsed-json')
     if not flickr.token_valid(perms='read'):
         flickr.get_request_token(oauth_callback='oob')
         authorize_url = flickr.auth_url(perms='read')
-        print(f"Open this URL to authorize: {authorize_url}")
+        print_and_log(f"Open this URL to authorize: {authorize_url}")
         verifier = input("Enter the verification code: ")
         flickr.get_access_token(verifier)
 
@@ -645,7 +638,7 @@ def main():
     downloaded_ids = set(progress.get("downloaded_ids", []))
 
     # First, gather all photos from all albums to track duplicates
-    print("🔍 Scanning albums to identify duplicate photos...")
+    print_and_log("🔍 Scanning albums to identify duplicate media files...")
     all_album_photo_ids = set()
     photo_locations = {}  # Maps photo_id -> list of albums containing it
     album_photos = {}     # Maps album_title -> list of (photo_id, title) tuples
@@ -653,11 +646,19 @@ def main():
     # Get list of all albums
     photosets = flickr_api_call_with_retries(flickr.photosets.getList, user_id=user_id)['photosets']['photoset']
     
+    # Initialize progress spinner
+    spinner = ProgressSpinner("Scanning albums...")
+    spinner.start()
+    
     # First pass: collect all photos and their locations
-    for photoset in photosets:
+    total_albums = len(photosets)
+    for album_index, photoset in enumerate(photosets, 1):
         album_id = photoset['id']
         album_title = sanitize_filename(photoset['title']['_content'])
         photo_ids = []
+
+        # Update progress spinner with current album
+        spinner.update(create_spinner_message(album_index, total_albums, album_title))
 
         page = 1
         while True:
@@ -680,11 +681,20 @@ def main():
                     photo_locations[pid] = []
                 photo_locations[pid].append(album_title)
                 
+                # Update spinner occasionally to show activity
+                if len(photo_ids) % 50 == 0:
+                    spinner.update(create_spinner_message(album_index, total_albums, album_title))
+                
             if page >= photos_data['pages']:
                 break
             page += 1
 
+        # Final update for this album
+        spinner.update(create_spinner_message(album_index, total_albums, album_title))
         album_photos[album_title] = photo_ids
+    
+    # Stop the spinner and show completion
+    spinner.stop("✅ Album scanning completed!")
     
     # Find duplicates and decide primary location
     duplicate_count = 0
@@ -709,7 +719,7 @@ def main():
                     photos_to_download[pid] = (album, title)
                     break
     
-    print(f"📊 Found {duplicate_count} photos that appear in multiple albums")
+    print_and_log(f"📊 Found {duplicate_count} media files that appear in multiple albums")
     
     # Second pass: Download photos to their primary locations
     album_summaries = {}
@@ -738,7 +748,7 @@ def main():
             result = process_downloads(album_title, summary["to_download"], flickr, url_cache, downloaded_ids)
             result_summaries.append(result)
         else:
-            print(f"\n📂 Album: {album_title} - All {summary['skipped']} photos already downloaded")
+            print_and_log(f"\n📂 Album: {album_title} - All {summary['skipped']} photos already downloaded")
             result_summaries.append({
                 "album": album_title,
                 "downloaded": 0,
@@ -772,15 +782,16 @@ def main():
         summary = process_downloads("Unsorted", unsorted_photo_ids, flickr, url_cache, downloaded_ids)
         result_summaries.append(summary)
     else:
-        print("\n📂 No photos found outside of albums.")
+        print_and_log("\n📂 No media files found outside of albums.")
 
     # Final summary
-    print("\n📊 Download Summary:")
+    print_and_log("\n📊 Download Summary:")
     for summary in result_summaries:
-        print(f"  {summary['album']}: {summary['downloaded']} downloaded, "
+        print_and_log(f"  {summary['album']}: {summary['downloaded']} downloaded, "
               f"{summary['skipped']} skipped, {summary['failed']} failed")
 
-    print("\n✅ All albums processed.")
+    print_and_log("\n✅ All albums processed.")
+    print_and_log("=" * 50)
 
 if __name__ == "__main__":
     main()
