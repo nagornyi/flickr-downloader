@@ -21,7 +21,7 @@ API_CALL_DELAY=1.1 # The minimum delay in seconds between Flickr API calls
 
 ## Video download limitations
 
-Please note that this script only downloads compressed video files, not the originals. This is a limitation of the Flickr API. However, it ensures that the compressed file with the highest possible resolution is downloaded.
+Please note that this script only downloads compressed video files, not the originals. This is a limitation of the Flickr API. However, it ensures that the compressed file with the highest possible resolution is downloaded. Download videos from Flickr manually when you need them in their original quality and size.
 
 ## Installation and running
 
