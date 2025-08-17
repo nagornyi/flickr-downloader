@@ -6,9 +6,9 @@ This script allows you to create a local mirror of your Flickr collection. Simpl
 
 Attention! Using Flickr Downloader is at your own risk. It is not affiliated with Flickr; it is a third-party project. This script uses the open API from Flickr https://www.flickr.com/services/api/ and relies on the `flickrapi` package (https://pypi.org/project/flickrapi/).
 
-## Environment variables
+## Set environment variables
 
-Make sure you create an `.env` file and put these environment variables into it. Generate your personal Flickr API key and secret https://www.flickr.com/account/sharing. Feel free to adjust the other variables according to your needs. Make sure you don't exceed the Flickr API limit; this is why there is a delay between API calls. All variables except `API_KEY` and `API_SECRET` are optional and will use their default values if not specified.
+Make sure you create an `.env` file and put the required environment variables into it. Generate your personal Flickr API key and secret https://www.flickr.com/account/sharing. Feel free to adjust the other variables according to your needs. Make sure you don't exceed the Flickr API limit; this is why there is a delay between API calls. To avoid hitting the 3,600 queries per hour limit or triggering Flickr server rate limiting or temporary blocks, we recommend keeping the default values of `API_CALL_DELAY` and `MAX_WORKERS`. All variables except `API_KEY` and `API_SECRET` are optional and will use their default values if not specified.
 
 ```sh
 API_KEY="your_api_key_here"
