@@ -1,8 +1,10 @@
 # Flickr Downloader
 
-This script downloads all your Flickr photos and videos in parallel threads, using the highest available resolution. If it hits the Flickr API limit, it will either retry or back off. All downloaded files are tracked. The script will not attempt to download files that have already been downloaded when you stop and then resume it. The 'Auto Upload' Flickr album is also included. Media files that are not part of an album or set will be downloaded to the 'Unsorted' directory.
+This script downloads all your Flickr photos and videos in parallel threads, using the highest available resolution. If it hits the Flickr API limit, it will either retry or back off. All downloaded files are tracked. The script will not attempt to download files that have already been downloaded. You can stop and resume this script multiple times. The 'Auto Upload' Flickr album is also included. Media files that are not part of an album or set will be downloaded to the 'Unsorted' directory.
 
-Using Flickr Downloader is at your own risk. It is not affiliated with Flickr; it is a third-party project.
+This script allows you to create a local mirror of your Flickr collection. Simply run the script regularly to add missing albums and/or photos to your local mirror and keep it consistent with the Flickr cloud.
+
+Attention! Using Flickr Downloader is at your own risk. It is not affiliated with Flickr; it is a third-party project. This script uses the open API from Flickr https://www.flickr.com/services/api/ and relies on the `flickrapi` package (https://pypi.org/project/flickrapi/).
 
 ## Environment variables
 
@@ -41,4 +43,49 @@ python3 flickr_downloader.py
 
 # 6. Deactivate the virtual environment
 deactivate
+```
+
+## Command Line Options
+
+The script supports several command line options for more control over what gets downloaded:
+
+### Download specific albums only
+
+Use the `--album` (or `-a`) option to download only albums matching a specific pattern:
+
+```sh
+# Download all albums (default behavior)
+python3 flickr_downloader.py
+
+# Download only the "Vacation 2023" album
+python3 flickr_downloader.py --album "Vacation 2023"
+
+# Download albums starting with "Trip" (supports wildcards)
+python3 flickr_downloader.py --album "Trip*"
+
+# Download albums containing "2023" anywhere in the name
+python3 flickr_downloader.py --album "*2023*"
+
+# Short form of the option
+python3 flickr_downloader.py -a "Family Photos"
+```
+
+**Wildcard support:**
+- `*` matches any number of characters
+- `?` matches any single character
+- Use quotes around album names with spaces or special characters
+
+**Examples:**
+- `"Trip*"` → matches "Trip to Paris", "Trip 2023", "Tropical Vacation"
+- `"*2023*"` → matches "Vacation 2023", "2023 Summer", "Photos 2023-2024"
+- `"Family ??"` → matches "Family 01", "Family 02", but not "Family 123"
+
+If no albums match your pattern, the script will show you a list of available albums to help you find the right name.
+
+**Note:** When using the `--album` filter, unsorted photos (photos not in any album) will be skipped. This keeps the download focused on the specific album(s) you requested.
+
+### Get help
+
+```sh
+python3 flickr_downloader.py --help
 ```

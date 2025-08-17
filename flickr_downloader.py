@@ -3,6 +3,7 @@ import re
 import sys
 import time
 import json
+import argparse
 import logging
 import requests
 import flickrapi
@@ -603,13 +604,57 @@ def process_downloads(album_title, photo_ids, flickr, url_cache, downloaded_ids)
         "failed": failed_count
     }
 
+def parse_arguments():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(
+        description="Download photos and videos from your Flickr account",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s                           # Download all albums
+  %(prog)s --album "Vacation 2023"   # Download only the "Vacation 2023" album
+  %(prog)s --album "Trip*"           # Download albums starting with "Trip"
+        """
+    )
+    
+    parser.add_argument(
+        '--album', '-a',
+        type=str,
+        help='Download only the specified album. Supports wildcards (* and ?). '
+             'If not specified, all albums will be downloaded.'
+    )
+    
+    return parser.parse_args()
+
+def filter_albums_by_pattern(photosets, pattern):
+    """Filter albums by name pattern (supports wildcards)"""
+    if not pattern:
+        return photosets
+    
+    import fnmatch
+    filtered = []
+    
+    for photoset in photosets:
+        album_title = photoset['title']['_content']
+        if fnmatch.fnmatch(album_title, pattern):
+            filtered.append(photoset)
+    
+    return filtered
+
 def main():
+    # Parse command line arguments
+    args = parse_arguments()
+    
     # Setup logging
     global logger
     logger = setup_logging()
     
     print_and_log("🚀 Starting Flickr Downloader")
     print_and_log("=" * 50)
+    
+    if args.album:
+        print_and_log(f"📂 Filtering albums: '{args.album}'")
+        print_and_log("=" * 50)
     
     # Check for required configurations
     if not API_KEY or not API_SECRET:
@@ -645,6 +690,29 @@ def main():
     
     # Get list of all albums
     photosets = flickr_api_call_with_retries(flickr.photosets.getList, user_id=user_id)['photosets']['photoset']
+    
+    # Filter albums if album parameter is provided
+    if args.album:
+        original_count = len(photosets)
+        photosets = filter_albums_by_pattern(photosets, args.album)
+        filtered_count = len(photosets)
+        
+        print_and_log(f"📊 Found {original_count} total albums, {filtered_count} match filter '{args.album}'")
+        
+        if filtered_count == 0:
+            print_and_log(f"❌ No albums found matching pattern '{args.album}'")
+            print_and_log("Available albums:")
+            all_photosets = flickr_api_call_with_retries(flickr.photosets.getList, user_id=user_id)['photosets']['photoset']
+            for ps in all_photosets[:20]:  # Show first 20 albums
+                print_and_log(f"  - {ps['title']['_content']}")
+            if len(all_photosets) > 20:
+                print_and_log(f"  ... and {len(all_photosets) - 20} more")
+            return
+        
+        print_and_log("Matching albums:")
+        for ps in photosets:
+            print_and_log(f"  ✅ {ps['title']['_content']}")
+        print_and_log("")
     
     # Initialize progress spinner
     spinner = ProgressSpinner("Scanning albums...")
@@ -757,32 +825,36 @@ def main():
             })
 
     # Download Unsorted (not in any album)
-    unsorted_photo_ids = []
-    page = 1
-    while True:
-        photos_data = flickr_api_call_with_retries(
-            flickr.people.getPhotos,
-            user_id=user_id,
-            privacy_filter=1,
-            media="all",
-            page=page
-        )['photos']
-
-        for photo in photos_data['photo']:
-            pid = photo['id']
-            if pid not in all_album_photo_ids:
-                title = sanitize_filename(photo['title'] or pid)
-                unsorted_photo_ids.append((pid, title))
-
-        if page >= photos_data['pages']:
-            break
-        page += 1
-
-    if unsorted_photo_ids:
-        summary = process_downloads("Unsorted", unsorted_photo_ids, flickr, url_cache, downloaded_ids)
-        result_summaries.append(summary)
+    # Skip unsorted photos if user specified a specific album filter
+    if args.album:
+        print_and_log("📂 Skipping unsorted photos (album filter specified)")
     else:
-        print_and_log("\n📂 No media files found outside of albums.")
+        unsorted_photo_ids = []
+        page = 1
+        while True:
+            photos_data = flickr_api_call_with_retries(
+                flickr.people.getPhotos,
+                user_id=user_id,
+                privacy_filter=1,
+                media="all",
+                page=page
+            )['photos']
+
+            for photo in photos_data['photo']:
+                pid = photo['id']
+                if pid not in all_album_photo_ids:
+                    title = sanitize_filename(photo['title'] or pid)
+                    unsorted_photo_ids.append((pid, title))
+
+            if page >= photos_data['pages']:
+                break
+            page += 1
+
+        if unsorted_photo_ids:
+            summary = process_downloads("Unsorted", unsorted_photo_ids, flickr, url_cache, downloaded_ids)
+            result_summaries.append(summary)
+        else:
+            print_and_log("\n📂 No media files found outside of albums.")
 
     # Final summary
     print_and_log("\n📊 Download Summary:")
