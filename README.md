@@ -89,3 +89,45 @@ If no albums match your pattern, the script will show you a list of available al
 ```sh
 python3 flickr_downloader.py --help
 ```
+
+## Duplicate Detection
+
+The downloader automatically detects and handles photos that appear in multiple albums to prevent duplicate downloads and save storage space.
+
+### How It Works
+
+1. **Two-Phase Scanning**: The script first scans all albums to map which photos appear where
+2. **Smart Primary Location Selection**: For photos in multiple albums, it chooses the best location using this priority:
+   - Prefers any manually created album over "Auto Upload"
+   - If multiple manual albums contain the same photo, uses the first one found
+   - Only uses "Auto Upload" if that's the only location
+
+3. **Single Download**: Each photo is downloaded only once to its primary location, regardless of how many albums contain it
+
+### Example
+
+```
+Photo "sunset.jpg" appears in:
+├── "Auto Upload" 
+├── "Vacation 2023"
+└── "Best Photos"
+
+→ Downloads to: "Vacation 2023" (avoids Auto Upload, uses first manual album)
+```
+
+### Benefits
+
+- **Saves Storage**: No duplicate files on your disk
+- **Saves Bandwidth**: Each photo downloaded only once
+- **Smart Organization**: Respects your manual album organization over automatic uploads
+- **Performance**: Significantly faster for users with many cross-album photos
+
+### Output Example
+
+```
+📊 Found 25 media files that appear in multiple albums
+  Wedding photo "ceremony.jpg" appears in: ["Wedding", "Family Photos", "Auto Upload"]
+  → Will download to: "Wedding" (avoiding Auto Upload)
+```
+
+The duplicate detection is particularly valuable for Flickr users who use Auto Upload from mobile devices or organize photos into multiple themed albums
