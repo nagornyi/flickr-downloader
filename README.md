@@ -8,13 +8,13 @@ Attention! Using Flickr Downloader is at your own risk. It is not affiliated wit
 
 ## Set environment variables
 
-Make sure you create an `.env` file and put the required environment variables into it. Generate your personal Flickr API key and secret https://www.flickr.com/account/sharing. Feel free to adjust the other variables according to your needs. Make sure you don't exceed the Flickr API limit; this is why there is a delay between API calls. To avoid hitting the 3,600 queries per hour limit or triggering Flickr server rate limiting or temporary blocks, we recommend keeping the default values of `API_CALL_DELAY` (If you encounter any API errors, try increasing this value) and `MAX_WORKERS` (If you hit diminishing returns or errors, lower this value). All variables except `API_KEY` and `API_SECRET` are optional and will use their default values if not specified.
+Make sure you create an `.env` file and put the required environment variables into it. Generate your personal Flickr API key and secret https://www.flickr.com/account/sharing. Feel free to adjust the other variables according to your needs. Make sure you don't exceed the Flickr API limit; this is why there is a delay between API calls. To avoid hitting the 3,600 queries per hour limit or triggering Flickr server rate limiting or temporary blocks, we recommend keeping the default values of `API_CALL_DELAY` (If you encounter any API errors, try increasing this value) and `MAX_WORKERS` (If you hit diminishing returns or errors, lower this value to 1). All variables except `API_KEY` and `API_SECRET` are optional and will use their default values if not specified.
 
 ```sh
 API_KEY="your_api_key_here"
 API_SECRET="your_api_secret_here"
 DOWNLOAD_DIR="./flickr_downloads" # The location where all the files are downloaded
-MAX_WORKERS=8 # Limit on parallel downloads
+MAX_WORKERS=8 # Limit on parallel downloads, lower this value to 1 if you see many failures
 DOWNLOAD_VIDEO=true  # Set this to 'false' to skip video downloads
 API_CALL_DELAY=1.1 # The minimum delay in seconds between Flickr API calls
 ```

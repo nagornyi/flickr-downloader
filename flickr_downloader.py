@@ -214,13 +214,6 @@ def is_video_file(filepath):
     
     return False
 
-def get_video_url_from_player(player_url):
-    """
-    Use the Flickr player URL directly for video downloads.
-    Flickr will serve the highest quality available from this URL.
-    """
-    return player_url
-
 def load_json_file(filepath):
     if os.path.exists(filepath):
         with open(filepath, "r", encoding="utf-8") as f:
@@ -254,8 +247,10 @@ def flickr_api_call_with_retries(func, *args, **kwargs):
             code = getattr(e, 'code', None)
             if code in [429, 503]:  # rate limit or server busy
                 print(f"⚠️ API rate limit hit or server busy, retry {attempt}/{MAX_RETRIES} after {backoff}s...")
+            elif code:
+                print(f"⚠️ Flickr API status code: {code}, retry {attempt}/{MAX_RETRIES} after {backoff}s...")
             else:
-                print(f"⚠️ Flickr API error: {e}, retry {attempt}/{MAX_RETRIES} after {backoff}s...")
+                print(f"⚠️ Flickr API error: {str(e)}, retry {attempt}/{MAX_RETRIES} after {backoff}s...")
         except (RequestException, Timeout) as e:
             print(f"⚠️ Network error: {e}, retry {attempt}/{MAX_RETRIES} after {backoff}s...")
             # For network errors, use a longer backoff
@@ -322,11 +317,7 @@ def get_original_url_and_info(flickr, photo_id, url_cache):
                 
                 # Include file size in selection info if available
                 size_info = format_file_size(best_video['file_size'])
-                selected_info = f"{best_video['label']} ({best_video['width']}x{best_video['height']}){size_info}"
-                
-                # Use player URL directly if it's a player URL
-                if '/play/' in original_url:
-                    original_url = get_video_url_from_player(original_url)
+                selected_info = f"{best_video['label']} ({best_video['width']}x{best_video['height']}){size_info}"                
                     
                 print_and_log(f"    🎬 Selected video quality: {selected_info}")
             else:
@@ -426,13 +417,20 @@ def download_file(url, filepath, media_type=None):
             for chunk in response.iter_content(8192):
                 f.write(chunk)
         return filepath
+    except requests.exceptions.RequestException as e:
+        error_msg = f"Network error downloading {os.path.basename(filepath)}: {str(e)}"
+        return f"ERROR: {filepath} - {error_msg}"
+    except IOError as e:
+        error_msg = f"File I/O error for {os.path.basename(filepath)}: {str(e)}"
+        return f"ERROR: {filepath} - {error_msg}"
     except Exception as e:
-        return f"ERROR: {filepath} - {e}"
+        error_msg = f"Unexpected error downloading {os.path.basename(filepath)}: {str(e)}"
+        return f"ERROR: {filepath} - {error_msg}"
 
 def process_downloads(album_title, photo_ids, flickr, url_cache, downloaded_ids):
     album_folder = os.path.join(DOWNLOAD_DIR, album_title)
     os.makedirs(album_folder, exist_ok=True)
-    print_and_log(f"📂 Processing album: {album_title} ({len(photo_ids)} photos)")
+    print_and_log(f"📂 Processing album: {album_title} ({len(photo_ids)} media files)")
     
     # Debug directory permissions
     try:
@@ -501,29 +499,7 @@ def process_downloads(album_title, photo_ids, flickr, url_cache, downloaded_ids)
                     if os.path.exists(test_path):
                         existing_file = test_path
                         break
-                # Also check with the wrong extension (jpg) in case it was downloaded incorrectly before
-                for wrong_ext in ['.jpg', '.jpeg']:
-                    test_path = os.path.join(album_folder, f"{base_name}{wrong_ext}")
-                    if os.path.exists(test_path):
-                        # Verify this is actually a video file
-                        if is_video_file(test_path):
-                            print(f"  🔄 Found video file with wrong extension: {test_path}")
-                            # Try to rename it to the correct extension
-                            correct_path = os.path.join(album_folder, f"{base_name}.mp4")
-                            if not os.path.exists(correct_path):
-                                try:
-                                    os.rename(test_path, correct_path)
-                                    print(f"  ✅ Renamed {os.path.basename(test_path)} -> {os.path.basename(correct_path)}")
-                                    existing_file = correct_path
-                                except Exception as e:
-                                    print(f"  ⚠️ Could not rename file: {e}")
-                                    existing_file = test_path
-                            else:
-                                existing_file = test_path
-                        else:
-                            # It's actually an image file, not a video
-                            print(f"  ℹ️ Found image file: {test_path} (not a video)")
-                        break
+
             else:
                 # For photos, check common image extensions
                 image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.tiff']
@@ -542,16 +518,17 @@ def process_downloads(album_title, photo_ids, flickr, url_cache, downloaded_ids)
 
             download_tasks.append((photo_id, url, filepath, media_type))
         except Exception as e:
-            print(f"  ❌ Error preparing download for {photo_id}: {e}")
+            error_msg = f"Error preparing download for {title} (ID: {photo_id}): {str(e)}"
+            print_and_log(f"  ❌ {error_msg}", "ERROR")
             failed_count += 1
 
     if not download_tasks:
-        print(f"  ⚠️ No files to download in this album. All {skipped_count} files were skipped.")
+        print(f"  ⚠️ No media files to download in this album. All {skipped_count} media files were skipped.")
         if photo_ids and skipped_count == 0 and failed_count == 0:
-            print(f"  ⚠️ CRITICAL: No downloads were queued despite having {len(photo_ids)} files.")
+            print(f"  ⚠️ CRITICAL: No downloads were queued despite having {len(photo_ids)} media files.")
         return {"album": album_title, "downloaded": 0, "skipped": skipped_count, "failed": failed_count}
     
-    print_and_log(f"  🔽 Downloading {len(download_tasks)} files...")
+    print_and_log(f"  🔽 Downloading {len(download_tasks)} media files...")
 
     def download_task(task):
         photo_id, url, path, media_type = task
@@ -568,7 +545,11 @@ def process_downloads(album_title, photo_ids, flickr, url_cache, downloaded_ids)
             try:
                 photo_id, result = future.result()
                 if isinstance(result, str) and result.startswith("ERROR"):
-                    print_and_log(f"  ❌ Failed: {os.path.basename(result.split(' - ')[0].replace('ERROR: ', ''))}", "ERROR")
+                    # Extract the actual error message for better logging
+                    error_parts = result.split(" - ", 1)
+                    filename = os.path.basename(error_parts[0].replace('ERROR: ', ''))
+                    error_detail = error_parts[1] if len(error_parts) > 1 else "Unknown error"
+                    print_and_log(f"  ❌ Failed: {filename} - {error_detail}", "ERROR")
                     failed_count += 1
                 else:
                     # Determine media type from file extension for logging
@@ -582,10 +563,19 @@ def process_downloads(album_title, photo_ids, flickr, url_cache, downloaded_ids)
                         downloaded_count += 1
                         downloaded_ids.add(photo_id)
                     else:
-                        print_and_log(f"  ⚠️ File verification failed for {filename}", "WARNING")
+                        error_msg = f"File verification failed for {filename} - file is empty or missing"
+                        print_and_log(f"  ⚠️ {error_msg}", "WARNING")
+                        # Try to remove the empty/corrupted file
+                        try:
+                            if os.path.exists(result):
+                                os.remove(result)
+                                print_and_log(f"  🗑️ Removed empty file: {filename}", "DEBUG")
+                        except Exception as cleanup_error:
+                            print_and_log(f"  ⚠️ Could not remove empty file {filename}: {cleanup_error}", "WARNING")
                         failed_count += 1
             except Exception as e:
-                print(f"  ❌ Unexpected error processing download result: {e}")
+                error_msg = f"Unexpected error processing download result: {str(e)}"
+                print_and_log(f"  ❌ {error_msg}", "ERROR")
                 failed_count += 1
 
     # Save progress after album
@@ -593,9 +583,9 @@ def process_downloads(album_title, photo_ids, flickr, url_cache, downloaded_ids)
     
     # Check downloads actually happened
     files_in_dir = len(os.listdir(album_folder))
-    print(f"  📊 Files now in directory: {files_in_dir}")
+    print(f"  📊 Media files now in directory: {files_in_dir}")
     if downloaded_count > 0 and files_in_dir == 0:
-        print(f"  ❌ CRITICAL: Files were reported as downloaded but directory is empty!")
+        print(f"  ❌ CRITICAL: Media files were reported as downloaded but directory is empty!")
     
     return {
         "album": album_title,
@@ -682,7 +672,7 @@ def main():
     progress = load_json_file(PROGRESS_FILE)
     downloaded_ids = set(progress.get("downloaded_ids", []))
 
-    # First, gather all photos from all albums to track duplicates
+    # First, gather all files from all albums to track duplicates
     print_and_log("🔍 Scanning albums to identify duplicate media files...")
     all_album_photo_ids = set()
     photo_locations = {}  # Maps photo_id -> list of albums containing it
@@ -816,7 +806,7 @@ def main():
             result = process_downloads(album_title, summary["to_download"], flickr, url_cache, downloaded_ids)
             result_summaries.append(result)
         else:
-            print_and_log(f"\n📂 Album: {album_title} - All {summary['skipped']} photos already downloaded")
+            print_and_log(f"\n📂 Album: {album_title} - All {summary['skipped']} media files already downloaded")
             result_summaries.append({
                 "album": album_title,
                 "downloaded": 0,
@@ -825,9 +815,9 @@ def main():
             })
 
     # Download Unsorted (not in any album)
-    # Skip unsorted photos if user specified a specific album filter
+    # Skip unsorted files if user specified a specific album filter
     if args.album:
-        print_and_log("📂 Skipping unsorted photos (album filter specified)")
+        print_and_log("📂 Skipping unsorted media files (album filter specified)")
     else:
         unsorted_photo_ids = []
         page = 1
@@ -858,11 +848,47 @@ def main():
 
     # Final summary
     print_and_log("\n📊 Download Summary:")
+    
+    # Separate successful and failed albums
+    successful_albums = []
+    failed_albums = []
+    total_downloaded = 0
+    total_skipped = 0
+    total_failed = 0
+    
     for summary in result_summaries:
-        print_and_log(f"  {summary['album']}: {summary['downloaded']} downloaded, "
-              f"{summary['skipped']} skipped, {summary['failed']} failed")
-
-    print_and_log("\n✅ All albums processed.")
+        total_downloaded += summary['downloaded']
+        total_skipped += summary['skipped']
+        total_failed += summary['failed']
+        
+        if summary['failed'] > 0:
+            failed_albums.append(summary)
+        else:
+            successful_albums.append(summary)
+    
+    # Show successful albums first
+    if successful_albums:
+        print_and_log("  ✅ Albums completed successfully:")
+        for summary in successful_albums:
+            print_and_log(f"    📂 {summary['album']}: {summary['downloaded']} downloaded, {summary['skipped']} skipped")
+    
+    # Show failed albums in a separate section
+    if failed_albums:
+        print_and_log("  ❌ Albums with failures:")
+        for summary in failed_albums:
+            print_and_log(f"    📂 {summary['album']}: {summary['downloaded']} downloaded, "
+                  f"{summary['skipped']} skipped, {summary['failed']} failed")
+    
+    # Overall totals
+    print_and_log(f"\n📈 Overall totals: {total_downloaded} downloaded, {total_skipped} skipped, {total_failed} failed")
+    
+    # Final status message
+    if total_failed > 0:
+        print_and_log(f"\n⚠️  Some downloads failed. You may want to run the script again to retry failed downloads.")
+        print_and_log(f"💡 Failed downloads are often due to temporary network issues and usually succeed on retry.")
+    else:
+        print_and_log(f"\n🎉 All downloads completed successfully! No failures detected.")
+    
     print_and_log("=" * 50)
 
 if __name__ == "__main__":
