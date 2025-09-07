@@ -131,3 +131,37 @@ Photo "sunset.jpg" appears in:
 ```
 
 The duplicate detection is particularly valuable for Flickr users who use Auto Upload from mobile devices or organize photos into multiple themed albums
+
+## 📂 Structure
+
+```
+flickr_downloader.py          # Main entry point (modular version)
+requirements.txt              # Dependencies
+README.md                     # Documentation
+LICENSE                       # License file
+.env                         # Environment variables
+
+flickr_downloader/           # Main package
+├── __init__.py             # Package initialization
+├── config.py               # Configuration & settings
+├── cli.py                  # Command line interface
+├── main.py                 # Application orchestration
+├── api/
+│   ├── __init__.py
+│   └── client.py           # Flickr API client
+├── download/
+│   ├── __init__.py
+│   └── manager.py          # Download management
+├── verification/
+│   ├── __init__.py
+│   └── checker.py          # Album verification
+└── utils/
+    ├── __init__.py
+    ├── files.py            # File operations
+    └── ui.py               # User interface
+
+cache/                      # Runtime cache
+├── progress.json           # Download progress
+├── url_cache.json          # URL cache
+└── flickr_downloader.log   # Application logs
+```
