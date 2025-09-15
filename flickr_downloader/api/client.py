@@ -61,7 +61,7 @@ class FlickrAPIClient:
         raise RuntimeError(f"API call failed after {config.MAX_RETRIES} retries.")
 
     def fetch_album_photos(self, flickr, album_id, user_id):
-        """Fetch all photos from an album with pagination."""
+        """Fetch all photos from an album with pagination, respecting video download settings."""
         page = 1
         album_photos = []
         
@@ -75,7 +75,15 @@ class FlickrAPIClient:
                 page=page
             )['photoset']
 
-            album_photos.extend(photos_data['photo'])
+            # Filter out videos if video downloads are disabled
+            if config.DOWNLOAD_VIDEO:
+                album_photos.extend(photos_data['photo'])
+            else:
+                # Only include photos, skip videos
+                for photo in photos_data['photo']:
+                    media_type = photo.get('media', 'photo')
+                    if media_type == 'photo':
+                        album_photos.append(photo)
             
             if page >= photos_data['pages']:
                 break

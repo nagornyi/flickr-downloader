@@ -1,167 +1,106 @@
 # Flickr Downloader
 
-This script downloads all your Flickr photos and videos in parallel threads, using the highest available resolution. If it hits the Flickr API limit, it will either retry or back off. All downloaded files are tracked. The script will not attempt to download files that have already been downloaded. You can stop and resume this script multiple times. The 'Auto Upload' Flickr album is also included. Media files that are not part of an album or set will be downloaded to the 'Unsorted' directory.
+A simple Python script to download all your Flickr photos and videos to local folders organized by album. Supports resume, filtering, and respects API rate limits.
 
-This script allows you to create a local mirror of your Flickr collection. Simply run the script regularly to add missing albums and/or photos to your local mirror and keep it consistent with the Flickr cloud.
+## Features
 
-Attention! Using Flickr Downloader is at your own risk. It is not affiliated with Flickr; it is a third-party project. This script uses the open API from Flickr https://www.flickr.com/services/api/ and relies on the `flickrapi` package (https://pypi.org/project/flickrapi/).
+- ✅ Downloads photos and videos in highest available resolution
+- ✅ Organizes files by album in separate folders  
+- ✅ Resume capability - tracks what's already downloaded
+- ✅ Skips "Auto Upload" album automatically
+- ✅ Optional video download (can be disabled)
+- ✅ Album filtering with wildcard support
+- ✅ Respects Flickr API rate limits
+- ✅ Album analysis script included
 
-## Set environment variables
+## Quick Start
 
-Make sure you create an `.env` file and put the required environment variables into it. Generate your personal Flickr API key and secret https://www.flickr.com/account/sharing. Feel free to adjust the other variables according to your needs. Make sure you don't exceed the Flickr API limit; this is why there is a delay between API calls. To avoid hitting the 3,600 queries per hour limit or triggering Flickr server rate limiting or temporary blocks, we recommend keeping the default values of `API_CALL_DELAY` (If you encounter any API errors, try increasing this value) and `MAX_WORKERS` (If you hit diminishing returns or errors, lower this value to 1). All variables except `API_KEY` and `API_SECRET` are optional and will use their default values if not specified.
-
-```sh
+1. **Get Flickr API credentials**: https://www.flickr.com/account/sharing
+2. **Create `.env` file**:
+```env
 API_KEY="your_api_key_here"
 API_SECRET="your_api_secret_here"
-DOWNLOAD_DIR="./flickr_downloads" # The location where all the files are downloaded
-MAX_WORKERS=8 # Limit on parallel downloads, lower this value to 1 if you see many failures
-DOWNLOAD_VIDEO=true  # Set this to 'false' to skip video downloads
-API_CALL_DELAY=1.1 # The minimum delay in seconds between Flickr API calls
+DOWNLOAD_DIR="./flickr_downloads"
+DOWNLOAD_VIDEO=true
+SKIP_ALBUMS=[]
 ```
 
-## Video download limitations
-
-Please note that this script only downloads compressed video files, not the originals. This is a limitation of the Flickr API. However, it ensures that the compressed file with the highest possible resolution is downloaded. Download videos from Flickr manually when you need them in their original quality and size.
-
-## Installation and running
-
-```sh
-# 1. Create the virtual environment
+3. **Install and run**:
+```bash
 python3 -m venv .venv
-
-# 2. Activate it
 source .venv/bin/activate
-
-# 3. Upgrade pip (optional but recommended)
-pip3 install --upgrade pip
-
-# 4. Install requirements
-pip3 install -r requirements.txt
-
-# 5. Run the script
-python3 flickr_downloader.py
-
-# 6. Deactivate the virtual environment
-deactivate
+pip install -r requirements.txt
+python -m flickr_downloader.main
 ```
 
-## Command Line Options
+## Configuration
 
-The script supports several command line options for more control over what gets downloaded:
+### Environment Variables (.env file)
 
-### Download specific albums only
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `API_KEY` | ✅ | - | Your Flickr API key |
+| `API_SECRET` | ✅ | - | Your Flickr API secret |
+| `DOWNLOAD_DIR` | ❌ | `./flickr_downloads` | Download directory |
+| `DOWNLOAD_VIDEO` | ❌ | `true` | Download videos (true/false) |
+| `MAX_WORKERS` | ❌ | `1` | Parallel download threads |
+| `API_CALL_DELAY` | ❌ | `1.1` | Delay between API calls (seconds) |
+| `SKIP_ALBUMS` | ❌ | `[]` | Additional albums to skip (JSON array) |
 
-Use the `--album` (or `-a`) option to download only albums matching a specific pattern:
+### Skip Albums
 
-```sh
-# Download all albums (default behavior)
-python3 flickr_downloader.py
+"Auto Upload" is always skipped. Add other albums to skip:
 
-# Download only the "Vacation 2023" album
-python3 flickr_downloader.py --album "Vacation 2023"
+```env
+# Skip additional albums
+SKIP_ALBUMS=["Screenshots", "All Videos", "Test Photos"]
 
-# Download albums starting with "Trip" (supports wildcards)
-python3 flickr_downloader.py --album "Trip*"
-
-# Download albums containing "2023" anywhere in the name
-python3 flickr_downloader.py --album "*2023*"
-
-# Short form of the option
-python3 flickr_downloader.py -a "Family Photos"
+# Skip no additional albums (Auto Upload still skipped)
+SKIP_ALBUMS=[]
 ```
 
-**Wildcard support:**
-- `*` matches any number of characters
-- `?` matches any single character
-- Use quotes around album names with spaces or special characters
+## Usage
 
-**Examples:**
-- `"Trip*"` → matches "Trip to Paris", "Trip 2023", "Tropical Vacation"
-- `"*2023*"` → matches "Vacation 2023", "2023 Summer", "Photos 2023-2024"
-- `"Family ??"` → matches "Family 01", "Family 02", but not "Family 123"
-
-If no albums match your pattern, the script will show you a list of available albums to help you find the right name.
-
-**Note:** When using the `--album` filter, unsorted photos (photos not in any album) will be skipped. This keeps the download focused on the specific album(s) you requested.
-
-### Get help
-
-```sh
-python3 flickr_downloader.py --help
+### Download All Albums
+```bash
+python -m flickr_downloader.main
 ```
 
-## Duplicate Detection
+### Download Specific Albums
+```bash
+# Download specific album
+python -m flickr_downloader.main --album "Vacation 2023"
 
-The downloader automatically detects and handles photos that appear in multiple albums to prevent duplicate downloads and save storage space.
-
-### How It Works
-
-1. **Two-Phase Scanning**: The script first scans all albums to map which photos appear where
-2. **Smart Primary Location Selection**: For photos in multiple albums, it chooses the best location using this priority:
-   - Prefers any manually created album over "Auto Upload"
-   - If multiple manual albums contain the same photo, uses the first one found
-   - Only uses "Auto Upload" if that's the only location
-
-3. **Single Download**: Each photo is downloaded only once to its primary location, regardless of how many albums contain it
-
-### Example
-
-```
-Photo "sunset.jpg" appears in:
-├── "Auto Upload" 
-├── "Vacation 2023"
-└── "Best Photos"
-
-→ Downloads to: "Vacation 2023" (avoids Auto Upload, uses first manual album)
+# Download albums matching pattern (wildcards supported)
+python -m flickr_downloader.main --album "Trip*"
+python -m flickr_downloader.main --album "*2023*"
 ```
 
-### Benefits
-
-- **Saves Storage**: No duplicate files on your disk
-- **Saves Bandwidth**: Each photo downloaded only once
-- **Smart Organization**: Respects your manual album organization over automatic uploads
-- **Performance**: Significantly faster for users with many cross-album photos
-
-### Output Example
-
-```
-📊 Found 25 media files that appear in multiple albums
-  Wedding photo "ceremony.jpg" appears in: ["Wedding", "Family Photos", "Auto Upload"]
-  → Will download to: "Wedding" (avoiding Auto Upload)
+### Album Analysis
+Generate a CSV report comparing remote vs local files:
+```bash
+python flickr_album_analysis.py
 ```
 
-The duplicate detection is particularly valuable for Flickr users who use Auto Upload from mobile devices or organize photos into multiple themed albums
+## Notes
 
-## 📂 Structure
+- **Auto Upload**: Always skipped (contains duplicates of organized photos)
+- **Videos**: Only compressed versions available via API (Flickr limitation)
+- **Resume**: Script remembers what's downloaded, safe to stop/restart
+- **Rate Limits**: Built-in delays prevent API limit issues
+
+## Project Structure
 
 ```
-flickr_downloader.py          # Main entry point (modular version)
-requirements.txt              # Dependencies
-README.md                     # Documentation
-LICENSE                       # License file
-.env                         # Environment variables
+flickr_downloader/          # Main package
+├── main.py                 # Application entry point
+├── config.py               # Configuration management  
+├── api/client.py           # Flickr API handling
+├── download/manager.py     # Download orchestration
+├── verification/checker.py # Album verification
+└── utils/                  # File operations & UI
 
-flickr_downloader/           # Main package
-├── __init__.py             # Package initialization
-├── config.py               # Configuration & settings
-├── cli.py                  # Command line interface
-├── main.py                 # Application orchestration
-├── api/
-│   ├── __init__.py
-│   └── client.py           # Flickr API client
-├── download/
-│   ├── __init__.py
-│   └── manager.py          # Download management
-├── verification/
-│   ├── __init__.py
-│   └── checker.py          # Album verification
-└── utils/
-    ├── __init__.py
-    ├── files.py            # File operations
-    └── ui.py               # User interface
-
-cache/                      # Runtime cache
-├── progress.json           # Download progress
-├── url_cache.json          # URL cache
-└── flickr_downloader.log   # Application logs
+flickr_album_analysis.py    # Album analysis script
+requirements.txt            # Dependencies
+.env                       # Your configuration
 ```

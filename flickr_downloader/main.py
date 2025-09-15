@@ -62,20 +62,19 @@ class FlickrDownloaderApp:
         downloaded_ids = set(progress.get("downloaded_ids", []))
 
         # Scan albums and process downloads
-        album_summaries, album_ids, photo_locations = self._scan_albums(args, downloaded_ids)
+        album_summaries, album_ids = self._scan_albums(args, downloaded_ids)
         
         if not album_summaries:
             return
             
         # Process downloads
         result_summaries = self._process_downloads(
-            args, album_summaries, album_ids, photo_locations, 
+            args, album_summaries, album_ids, 
             url_cache, downloaded_ids
         )
         
-        # Handle unsorted photos if not filtering by album
-        if not args.album:
-            self._process_unsorted_photos(url_cache, downloaded_ids, result_summaries)
+        # Skip unsorted photos processing - only download from organized albums
+        print_and_log("ℹ️ Skipping unsorted photos - downloading from organized albums only")
         
         # Final summary and verification
         self._show_final_summary(args, result_summaries)
@@ -98,70 +97,107 @@ class FlickrDownloaderApp:
         return True
 
     def _scan_albums(self, args, downloaded_ids):
-        """Scan all albums and identify duplicates."""
-        print_and_log("🔍 Scanning albums to identify duplicate media files...")
-        
-        all_album_photo_ids = set()
-        photo_locations = {}  # Maps photo_id -> list of albums containing it
-        album_photos = {}     # Maps album_title -> list of (photo_id, title) tuples
+        """Scan all albums and prepare for downloads."""
+        print_and_log("🔍 Scanning albums...")
         
         # Get list of all albums
         photosets = self.api_client.call_with_retries(
             self.flickr.photosets.getList, user_id=self.user_id
         )['photosets']['photoset']
         
+        # Filter out skipped albums (Auto Upload and others from SKIP_ALBUMS)
+        original_count = len(photosets)
+        filtered_photosets = []
+        skipped_albums = []
+        
+        for photoset in photosets:
+            album_title = photoset['title']['_content']
+            if config.should_skip_album(album_title):
+                skipped_albums.append(album_title)
+            else:
+                filtered_photosets.append(photoset)
+        
+        photosets = filtered_photosets
+        
+        # Show what was skipped
+        if skipped_albums:
+            print_and_log(f"⏭️ Skipped {len(skipped_albums)} albums: {', '.join(skipped_albums)}")
+        
+        print_and_log(f"📊 Found {original_count} total albums, {len(photosets)} albums to process")
+        
         # Filter albums if album parameter is provided
         photosets, album_ids = self._filter_albums(args, photosets)
         
         if not photosets:
-            return {}, {}, {}
+            return {}, {}
         
         # Initialize progress spinner
         spinner = ProgressSpinner("Scanning albums...")
         spinner.start()
         
-        # First pass: collect all photos and their locations
+        # Create simple album summaries
+        album_summaries = {}
         total_albums = len(photosets)
+        
         for album_index, photoset in enumerate(photosets, 1):
             album_id = photoset['id']
             album_title = sanitize_filename(photoset['title']['_content'])
             album_ids[album_title] = album_id
-            photo_ids = []
 
             # Update progress spinner with current album
             spinner.update(create_spinner_message(album_index, total_albums, album_title))
 
+            # Get album info to check photo/video counts before fetching all content
+            album_info = self.api_client.call_with_retries(
+                self.flickr.photosets.getInfo, photoset_id=album_id
+            )['photoset']
+            
+            photo_count = int(album_info.get('count_photos', 0))
+            video_count = int(album_info.get('count_videos', 0))
+            
+            # Skip albums that only contain videos when video downloads are disabled
+            if not config.DOWNLOAD_VIDEO and photo_count == 0 and video_count > 0:
+                print_and_log(f"⏭️ Skipping '{album_title}' - contains only {video_count} videos (DOWNLOAD_VIDEO=false)")
+                continue
+            elif not config.DOWNLOAD_VIDEO and video_count > 0:
+                print_and_log(f"📊 Album '{album_title}': {photo_count} photos, {video_count} videos (videos will be skipped)")
+
             # Fetch all photos from this album
             album_photo_data = self.api_client.fetch_album_photos(self.flickr, album_id, self.user_id)
+            
+            # Create list of photos to download
+            photos_to_download = []
+            skipped_count = 0
             
             for photo in album_photo_data:
                 pid = photo['id']
                 title = sanitize_filename(photo['title'] or pid)
-                photo_ids.append((pid, title))
-                all_album_photo_ids.add(pid)
                 
-                # Track which albums contain this photo
-                if pid not in photo_locations:
-                    photo_locations[pid] = []
-                photo_locations[pid].append(album_title)
+                if pid not in downloaded_ids:
+                    photos_to_download.append((pid, title))
+                else:
+                    skipped_count += 1
                 
                 # Update spinner occasionally to show activity
-                if len(photo_ids) % 50 == 0:
+                if len(photos_to_download) % 50 == 0:
                     spinner.update(create_spinner_message(album_index, total_albums, album_title))
+
+            # Create album summary
+            album_summaries[album_title] = {
+                "album": album_title,
+                "to_download": photos_to_download,
+                "downloaded": 0,
+                "skipped": skipped_count,
+                "failed": 0
+            }
 
             # Final update for this album
             spinner.update(create_spinner_message(album_index, total_albums, album_title))
-            album_photos[album_title] = photo_ids
         
         # Stop the spinner and show completion
         spinner.stop("✅ Album scanning completed!")
         
-        # Process duplicates and create download plan
-        album_summaries = self._process_duplicates_and_create_plan(
-            photo_locations, album_photos, downloaded_ids
-        )
-        
-        return album_summaries, album_ids, photo_locations
+        return album_summaries, album_ids
 
     def _filter_albums(self, args, photosets):
         """Filter albums based on command line arguments."""
@@ -176,14 +212,20 @@ class FlickrDownloaderApp:
             
             if filtered_count == 0:
                 print_and_log(f"❌ No albums found matching pattern '{args.album}'")
-                print_and_log("Available albums:")
+                print_and_log("Available albums (excluding skipped albums):")
+                # Get the original unfiltered list but apply skip filtering
                 all_photosets = self.api_client.call_with_retries(
                     self.flickr.photosets.getList, user_id=self.user_id
                 )['photosets']['photoset']
-                for ps in all_photosets[:20]:  # Show first 20 albums
+                
+                # Filter out skipped albums from display list too
+                available_albums = [ps for ps in all_photosets 
+                                  if not config.should_skip_album(ps['title']['_content'])]
+                
+                for ps in available_albums[:20]:  # Show first 20 available albums
                     print_and_log(f"  - {ps['title']['_content']}")
-                if len(all_photosets) > 20:
-                    print_and_log(f"  ... and {len(all_photosets) - 20} more")
+                if len(available_albums) > 20:
+                    print_and_log(f"  ... and {len(available_albums) - 20} more")
                 return [], {}
             
             print_and_log("Matching albums:")
@@ -193,56 +235,7 @@ class FlickrDownloaderApp:
         
         return photosets, album_ids
 
-    def _process_duplicates_and_create_plan(self, photo_locations, album_photos, downloaded_ids):
-        """Process duplicates and create download plan."""
-        # Find duplicates and decide primary location
-        duplicate_count = 0
-        photos_to_download = {}  # Maps photo_id -> (album_title, photo_title)
-        
-        for pid, albums in photo_locations.items():
-            if len(albums) > 1:
-                duplicate_count += 1
-                # If photo appears in multiple albums, prefer any album other than "Auto Upload"
-                primary_album = next((album for album in albums if album != "Auto Upload"), albums[0])
-                
-                # Find the photo title from the primary album
-                for photo_id, title in album_photos[primary_album]:
-                    if photo_id == pid:
-                        photos_to_download[pid] = (primary_album, title)
-                        break
-            else:
-                # For non-duplicates, just use the only album
-                album = albums[0]
-                for photo_id, title in album_photos[album]:
-                    if photo_id == pid:
-                        photos_to_download[pid] = (album, title)
-                        break
-        
-        print_and_log(f"📊 Found {duplicate_count} media files that appear in multiple albums")
-        
-        # Create album summaries
-        album_summaries = {}
-        
-        for pid, (album_title, photo_title) in photos_to_download.items():
-            # Initialize album summary if needed
-            if album_title not in album_summaries:
-                album_summaries[album_title] = {
-                    "album": album_title,
-                    "to_download": [],
-                    "downloaded": 0,
-                    "skipped": 0,
-                    "failed": 0
-                }
-                
-            # Add to download list if not already downloaded
-            if pid not in downloaded_ids:
-                album_summaries[album_title]["to_download"].append((pid, photo_title))
-            else:
-                album_summaries[album_title]["skipped"] += 1
-        
-        return album_summaries
-
-    def _process_downloads(self, args, album_summaries, album_ids, photo_locations, url_cache, downloaded_ids):
+    def _process_downloads(self, args, album_summaries, album_ids, url_cache, downloaded_ids):
         """Process downloads for all albums."""
         result_summaries = []
         albums_with_verification_issues = []
@@ -259,7 +252,7 @@ class FlickrDownloaderApp:
                 # For single album downloads, verify immediately
                 self.verifier.handle_single_album_verification(
                     args, album_title, album_ids, self.flickr, downloaded_ids, 
-                    photo_locations, albums_with_verification_issues
+                    albums_with_verification_issues
                 )
             else:
                 print_and_log(f"\n📂 Album: {album_title} - All {summary['skipped']} media files already downloaded")
@@ -267,7 +260,7 @@ class FlickrDownloaderApp:
                 # For single album downloads, verify immediately
                 self.verifier.handle_single_album_verification(
                     args, album_title, album_ids, self.flickr, downloaded_ids, 
-                    photo_locations, albums_with_verification_issues
+                    albums_with_verification_issues
                 )
                 
                 album_result = {
@@ -283,13 +276,13 @@ class FlickrDownloaderApp:
         # Handle verification issues and retries
         self._handle_verification_issues(
             args, albums_with_verification_issues, album_summaries, 
-            album_ids, photo_locations, url_cache, downloaded_ids, result_summaries
+            album_ids, url_cache, downloaded_ids, result_summaries
         )
         
         return result_summaries
 
     def _handle_verification_issues(self, args, albums_with_verification_issues, album_summaries, 
-                                   album_ids, photo_locations, url_cache, downloaded_ids, result_summaries):
+                                   album_ids, url_cache, downloaded_ids, result_summaries):
         """Handle albums that need verification and potential retries."""
         # For full downloads (no --album parameter), verify all albums after all downloads
         if not args.album:
@@ -301,8 +294,7 @@ class FlickrDownloaderApp:
                         album_title, 
                         album_ids[album_title], 
                         self.flickr, 
-                        downloaded_ids, 
-                        photo_locations
+                        downloaded_ids
                     )
                     
                     if not verification_passed:
@@ -313,10 +305,10 @@ class FlickrDownloaderApp:
 
         # Handle albums that need retry downloads (with user confirmation)
         if albums_with_verification_issues:
-            self._process_retry_downloads(args, albums_with_verification_issues, photo_locations, 
+            self._process_retry_downloads(args, albums_with_verification_issues, 
                                         url_cache, downloaded_ids, result_summaries)
 
-    def _process_retry_downloads(self, args, albums_with_verification_issues, photo_locations,
+    def _process_retry_downloads(self, args, albums_with_verification_issues,
                                url_cache, downloaded_ids, result_summaries):
         """Process retry downloads for albums with verification issues."""
         if not args.album:
@@ -367,8 +359,7 @@ class FlickrDownloaderApp:
                     album_title, 
                     album_id, 
                     self.flickr, 
-                    downloaded_ids, 
-                    photo_locations
+                    downloaded_ids
                 )
                 
                 if final_verification:
@@ -438,76 +429,12 @@ class FlickrDownloaderApp:
         # Overall totals
         print_and_log(f"\n📈 Overall totals: {total_downloaded} downloaded, {total_skipped} skipped, {total_failed} failed")
         
-        # Final verification for full downloads
-        if not args.album:
-            self._perform_final_account_verification(total_failed)
-
-    def _perform_final_account_verification(self, total_failed):
-        """Perform final account-wide verification."""
-        print_and_log("\n🔍 Performing final account verification...")
-        try:
-            # Get total items count from Flickr account
-            person_info = self.api_client.call_with_retries(
-                self.flickr.people.getInfo, user_id=self.user_id
-            )['person']
-            flickr_photos_count = int(person_info.get('photos', {}).get('count', 0))
-            flickr_videos_count = int(person_info.get('videos', {}).get('count', 0))
-            
-            print_and_log(f"  📊 Flickr account totals: {flickr_photos_count:,} photos, {flickr_videos_count:,} videos")
-            
-            # Calculate expected local count based on settings
-            expected_flickr_total = flickr_photos_count
-            if config.DOWNLOAD_VIDEO:
-                expected_flickr_total += flickr_videos_count
-                print_and_log(f"  📊 Expected local files (photos + videos): {expected_flickr_total:,}")
-            else:
-                print_and_log(f"  📊 Expected local files (photos only): {expected_flickr_total:,}")
-            
-            # Count actual local files
-            actual_local_count = 0
-            if os.path.exists(config.DOWNLOAD_DIR):
-                for root, dirs, files in os.walk(config.DOWNLOAD_DIR):
-                    for filename in files:
-                        file_path = os.path.join(root, filename)
-                        if os.path.isfile(file_path) and os.path.getsize(file_path) > 0:
-                            # If video downloads are disabled, skip video files
-                            if not config.DOWNLOAD_VIDEO:
-                                ext = os.path.splitext(filename)[1].lower()
-                                if ext in ['.mp4', '.mov', '.avi', '.webm', '.mkv', '.flv', '.wmv']:
-                                    continue
-                            actual_local_count += 1
-            
-            print_and_log(f"  📊 Actual local files found: {actual_local_count:,}")
-            
-            # Compare and report
-            difference = expected_flickr_total - actual_local_count
-            if difference == 0:
-                print_and_log(f"  ✅ Perfect match! All {actual_local_count:,} files are accounted for.")
-            elif difference > 0:
-                print_and_log(f"  ⚠️ Missing {difference:,} files locally (Expected: {expected_flickr_total:,}, Found: {actual_local_count:,})")
-                print_and_log(f"     💡 This might be due to:")
-                print_and_log(f"        • Private photos not accessible via API")
-                print_and_log(f"        • Photos deleted from Flickr but still counted")
-                print_and_log(f"        • Failed downloads from previous runs")
-                print_and_log(f"        • Network issues during download")
-            else:
-                extra_files = -difference
-                print_and_log(f"  ℹ️ Found {extra_files:,} extra local files (Expected: {expected_flickr_total:,}, Found: {actual_local_count:,})")
-                print_and_log(f"     💡 This might be due to:")
-                print_and_log(f"        • Duplicate downloads from different albums")
-                print_and_log(f"        • Files added manually to the download directory")
-                print_and_log(f"        • Previous downloads with different naming schemes")
-                
-        except Exception as e:
-            print_and_log(f"  ❌ Could not perform final verification: {e}", "ERROR")
-        
         # Final status message
         if total_failed > 0:
             print_and_log(f"\n⚠️  Some downloads failed. You may want to run the script again to retry failed downloads.")
             print_and_log(f"💡 Failed downloads are often due to temporary network issues and usually succeed on retry.")
         else:
             print_and_log(f"\n🎉 All downloads completed successfully! No failures detected.")
-
 
 def main():
     """Main entry point for the application."""

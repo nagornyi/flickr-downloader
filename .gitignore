@@ -211,3 +211,6 @@ __marimo__/
 
 # Temporary files
 cache/
+
+# Album analysis output
+.csv

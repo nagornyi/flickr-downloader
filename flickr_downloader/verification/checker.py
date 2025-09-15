@@ -1,6 +1,6 @@
 """
 Verification module for the Flickr downloader.
-Handles album completion verification and duplicate detection.
+Handles album completion verification.
 """
 import os
 
@@ -15,7 +15,7 @@ class AlbumVerifier:
     def __init__(self, api_client):
         self.api_client = api_client
     
-    def verify_album_completion(self, album_title, album_id, flickr, downloaded_ids, duplicates_info=None):
+    def verify_album_completion(self, album_title, album_id, flickr, downloaded_ids):
         """
         Verify that an album download is complete by comparing Flickr counts with local files.
         Returns True if complete, False if missing files detected (and resets tracking).
@@ -26,56 +26,43 @@ class AlbumVerifier:
             flickr_photos = int(album_info.get('count_photos', 0))
             flickr_videos = int(album_info.get('count_videos', 0))
             
-            # Get all photo details to check for internal duplicates
+            # Get all photo details
             album_photos = self.api_client.fetch_album_photos(flickr, album_id, flickr.test.login()['user']['id'])
             
-            # Count unique filenames (this is what we actually expect to download)
-            unique_photo_ids = set()
-            photos_only_count = 0
-            videos_only_count = 0
+            # Count what we expect to download based on settings
+            expected_photos = 0
+            expected_videos = 0
             videos_skipped_count = 0
             
             for photo in album_photos:
                 media_type = photo.get('media', 'photo')
-                photo_id = photo['id']
                 
                 if media_type == 'photo':
-                    photos_only_count += 1
-                    unique_photo_ids.add(photo_id)
+                    expected_photos += 1
                 elif media_type == 'video':
-                    videos_only_count += 1
                     if config.DOWNLOAD_VIDEO:
-                        unique_photo_ids.add(photo_id)
+                        expected_videos += 1
                     else:
                         videos_skipped_count += 1
             
-            # Calculate expected local count based on unique photo IDs and settings
-            expected_local_count = len(unique_photo_ids)
+            # Total expected files to download
+            expected_local_count = expected_photos + expected_videos
             
-            # If we have duplicate info, subtract duplicates that should be in other albums
-            duplicates_in_other_albums = 0
-            if duplicates_info:
-                duplicates_in_other_albums = self._calculate_cross_album_duplicates(
-                    duplicates_info, album_title
-                )
-            
-            expected_local_count -= duplicates_in_other_albums
-            
-            # Count actual local files (excluding videos if they're disabled)
+            # Count actual local files
             actual_local_count = self._count_local_files(album_title)
             
             # Check for differences and handle accordingly
             return self._evaluate_verification_results(
                 album_title, expected_local_count, actual_local_count,
                 flickr_photos, flickr_videos, videos_skipped_count,
-                duplicates_in_other_albums, album_photos, downloaded_ids
+                album_photos, downloaded_ids
             )
             
         except Exception as e:
             print_and_log(f"  ❌ Album verification error for {album_title}: {e}", "ERROR")
             return True  # Don't reset on verification errors
     
-    def handle_single_album_verification(self, args, album_title, album_ids, flickr, downloaded_ids, photo_locations, albums_with_verification_issues):
+    def handle_single_album_verification(self, args, album_title, album_ids, flickr, downloaded_ids, albums_with_verification_issues):
         """
         Handle verification for single album downloads with user confirmation.
         Returns True if verification passed, False otherwise.
@@ -86,8 +73,7 @@ class AlbumVerifier:
                 album_title, 
                 album_ids[album_title], 
                 flickr, 
-                downloaded_ids, 
-                photo_locations
+                downloaded_ids
             )
             
             if not verification_passed:
@@ -103,28 +89,6 @@ class AlbumVerifier:
             return verification_passed
         
         return True  # No verification needed for multi-album downloads
-    
-    def _calculate_cross_album_duplicates(self, duplicates_info, album_title):
-        """Calculate how many duplicates should be in other albums."""
-        duplicates_in_other_albums = 0
-        
-        for photo_id, locations in duplicates_info.items():
-            if len(locations) > 1 and album_title in locations:
-                # This photo appears in multiple albums
-                # Check if this album is the primary location
-                primary_album = None
-                for loc in locations:
-                    if not loc.startswith("Auto Upload"):  # Prefer non-Auto Upload
-                        primary_album = loc
-                        break
-                if not primary_album:
-                    primary_album = locations[0]  # Fallback to first
-                
-                # If this album is not the primary, we expect one less file here
-                if album_title != primary_album:
-                    duplicates_in_other_albums += 1
-        
-        return duplicates_in_other_albums
     
     def _count_local_files(self, album_title):
         """Count actual local files in the album folder."""
@@ -146,27 +110,23 @@ class AlbumVerifier:
     
     def _evaluate_verification_results(self, album_title, expected_local_count, actual_local_count,
                                      flickr_photos, flickr_videos, videos_skipped_count,
-                                     duplicates_in_other_albums, album_photos, downloaded_ids):
+                                     album_photos, downloaded_ids):
         """Evaluate verification results and take appropriate action."""
-        difference = expected_local_count - actual_local_count
         
-        if difference > 0:
+        # Simple comparison - just check if we have the expected files
+        if actual_local_count < expected_local_count:
+            missing_files = expected_local_count - actual_local_count
             print_and_log(f"  ⚠️ Album verification failed: {album_title}", "WARNING")
-            print_and_log(f"     Expected: {expected_local_count} files, Found: {actual_local_count} files", "WARNING")
-            print_and_log(f"     Flickr: {flickr_photos} photos, {flickr_videos} videos", "DEBUG")
+            print_and_log(f"     Missing {missing_files} files (Expected: {expected_local_count}, Found: {actual_local_count})", "WARNING")
+            
             if videos_skipped_count > 0:
-                print_and_log(f"     Note: {videos_skipped_count} videos excluded (DOWNLOAD_VIDEO=false)", "INFO")
-            if duplicates_in_other_albums > 0:
-                print_and_log(f"     Cross-album duplicates: {duplicates_in_other_albums}", "DEBUG")
+                print_and_log(f"     Note: {videos_skipped_count} videos excluded from download (DOWNLOAD_VIDEO=false)", "INFO")
             
             # Reset tracking for this album by removing all its photo IDs from downloaded_ids
             try:
                 album_photo_ids = set(photo['id'] for photo in album_photos)
-                
-                # Remove these IDs from downloaded_ids
                 removed_count = len(album_photo_ids.intersection(downloaded_ids))
                 downloaded_ids.difference_update(album_photo_ids)
-                
                 print_and_log(f"     Reset tracking for {removed_count} files in {album_title}", "INFO")
                 return False
                 
@@ -174,18 +134,10 @@ class AlbumVerifier:
                 print_and_log(f"     Failed to reset tracking for {album_title}: {e}", "ERROR")
                 return False
         
-        elif difference == 0:
+        else:
+            # We have at least the expected number of files - verification passed
             if videos_skipped_count > 0:
                 print_and_log(f"  ✅ Album verification passed: {album_title} ({actual_local_count} files, {videos_skipped_count} videos excluded)", "INFO")
             else:
                 print_and_log(f"  ✅ Album verification passed: {album_title} ({actual_local_count} files)", "DEBUG")
-            return True
-        
-        else:  # difference < 0 (more local files than expected)
-            extra_files = -difference
-            if videos_skipped_count > 0:
-                print_and_log(f"  ℹ️ Album has extra files: {album_title} (+{extra_files} files, {videos_skipped_count} videos excluded)", "INFO")
-            else:
-                print_and_log(f"  ℹ️ Album has extra files: {album_title} (+{extra_files} files)", "INFO")
-            print_and_log(f"  ✅ Album verification passed: {album_title} ({actual_local_count} files)", "DEBUG")
             return True
