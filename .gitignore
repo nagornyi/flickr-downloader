@@ -213,4 +213,4 @@ __marimo__/
 cache/
 
 # Album analysis output
-.csv
+*.csv
